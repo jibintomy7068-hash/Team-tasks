@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
+<title>Team Tasks</title>
+<style>
+:root{--bg:#f5f5f2;--card:#fff;--tx:#1d1d1b;--mut:#6b6b66;--ln:#e2e1dc;--ac:#1f6feb;--ok:#1a7f4b;--wip:#b26a00}
+@media (prefers-color-scheme:dark){:root{--bg:#151514;--card:#201f1e;--tx:#f0efea;--mut:#9a9992;--ln:#33322f;--ac:#5aa0ff;--ok:#4cc38a;--wip:#e8a23a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:640px;margin:auto;padding:calc(12px + env(safe-area-inset-top,0px)) 14px calc(80px + env(safe-area-inset-bottom,0px))}
+h1{font-size:20px;margin:4px 0 10px}
+.bar{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.tab,.btn{border:1px solid var(--ln);background:var(--card);color:var(--tx);padding:8px 14px;border-radius:20px;font:inherit;cursor:pointer}
+.tab.on,.btn.p{background:var(--ac);border-color:var(--ac);color:#fff}
+.card{background:var(--card);border:1px solid var(--ln);border-radius:12px;padding:12px;margin-bottom:10px}
+.row{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}
+.t{font-weight:600}.m{color:var(--mut);font-size:13px}
+.chip{font-size:12px;padding:2px 8px;border-radius:10px;border:1px solid var(--ln);white-space:nowrap}
+.s-Done{color:var(--ok);border-color:var(--ok)}.s-In{color:var(--wip);border-color:var(--wip)}.s-Pending{color:var(--mut)}
+input,select,textarea{width:100%;font:inherit;padding:9px;margin:4px 0 8px;border:1px solid var(--ln);border-radius:8px;background:var(--bg);color:var(--tx)}
+.tl{border-top:1px solid var(--ln);margin-top:10px;padding-top:8px}
+.u{margin:8px 0;font-size:14px}.u img{max-width:100%;border-radius:8px;margin-top:4px;display:block}
+.note{padding:20px;text-align:center;color:var(--mut)}.err{color:#d33;font-size:13px}
+</style></head><body>
+<h1>📋 Team Tasks</h1>
+<div id="app"><div class="note">Loading…</div></div>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script>
+// ====== PASTE YOUR FIREBASE CONFIG HERE (Project settings > Your apps > Web app) ======
+const firebaseConfig = {
+  apiKey: "AIzaSyDuP_3_wSOJ57NPKY2yNx2uXzJn6chy1Hs",
+  authDomain: "complex-av.firebaseapp.com",
+  projectId: "complex-av",
+  storageBucket: "complex-av.firebasestorage.app",
+  messagingSenderId: "278158481445",
+  appId: "1:278158481445:web:745535a04c5f066b3287cc"
+};
+// =======================================================================================
+firebase.initializeApp(firebaseConfig);
+const auth=firebase.auth(),db=firebase.firestore();
+const TYPES=["Event","Maintenance","Installation","Other"],STAT=["Pending","In progress","Done"];
+let me=null,isLead=false,tasks=[],updates=[],users={},filter="all",open=null,panel=null,busy=false,unsubs=[],err="";
+const $=id=>document.getElementById(id),A=()=>$("app");
+const esc=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const nm=id=>id?(users[id]?users[id].name:"Someone"):"Unassigned";
+const cls=s=>"s-"+s.split(" ")[0];
+const latest=t=>{const u=updates.filter(x=>x.taskId===t.id).sort((a,b)=>b.at-a.at);return u[0]?u[0].status:"Pending"};
+const msg=e=>({"auth/invalid-credential":"Wrong email or password","auth/email-already-in-use":"Email already in use","auth/weak-password":"Password needs 6+ characters","auth/invalid-email":"Invalid email"}[e.code]||e.message);
+
+async function showLogin(){
+  let setup=false;try{setup=!(await db.doc("config/leader").get()).exists}catch(e){}
+  A().innerHTML=`<div class="card"><div class="t">${setup?"First-time setup: create the team leader account":"Sign in"}</div>
+  ${setup?'<input id="n" placeholder="Your name">':""}<input id="e" type="email" placeholder="Email" autocomplete="username"><input id="p" type="password" placeholder="Password" autocomplete="current-password">
+  <div class="err">${esc(err)}</div><button class="btn p" onclick="${setup?"doSetup()":"doLogin()"}">${setup?"Create leader account":"Sign in"}</button></div>`;
+}
+async function doLogin(){err="";try{await auth.signInWithEmailAndPassword($("e").value.trim(),$("p").value)}catch(e){err=msg(e);showLogin()}}
+async function doSetup(){
+  const name=$("n").value.trim(),email=$("e").value.trim(),pw=$("p").value;if(!name)return alert("Enter your name");
+  busy=true;try{const c=await auth.createUserWithEmailAndPassword(email,pw),uid=c.user.uid,b=db.batch();
+    b.set(db.doc("config/leader"),{owner:uid});b.set(db.doc("users/"+uid),{name,email,role:"leader"});await b.commit();busy=false;start(c.user)}
+  catch(e){busy=false;err=msg(e);showLogin()}
+}
+function start(u){
+  me=u.uid;
+  unsubs.push(db.collection("users").onSnapshot(s=>{users={};s.forEach(d=>users[d.id]=d.data());isLead=!!(users[me]&&users[me].role==="leader");render()}));
+  unsubs.push(db.collection("tasks").onSnapshot(s=>{tasks=s.docs.map(d=>({id:d.id,...d.data()}));render()}));
+  unsubs.push(db.collection("updates").onSnapshot(s=>{updates=s.docs.map(d=>({id:d.id,...d.data()}));render()}));
+}
+auth.onAuthStateChanged(u=>{unsubs.forEach(f=>f());unsubs=[];if(busy)return;if(!u){me=null;showLogin()}else start(u)});
+
+function render(){
+  if(!me||!users[me]){A().innerHTML='<div class="note">Loading…</div>';return}
+  let L=tasks.slice().sort((a,b)=>b.created-a.created);if(filter=="mine")L=L.filter(t=>t.assignee===me);
+  A().innerHTML=`<div class="bar"><button class="tab ${filter=="all"?"on":""}" onclick="filter='all';render()">All</button><button class="tab ${filter=="mine"?"on":""}" onclick="filter='mine';render()">My tasks</button>
+  ${isLead?`<button class="btn p" onclick="panel=panel=='task'?null:'task';render()">＋ New task</button><button class="btn" onclick="panel=panel=='team'?null:'team';render()">👥 Team</button>`:""}<button class="btn" onclick="auth.signOut()">Sign out</button></div>
+  ${panel=="task"&&isLead?taskForm():""}${panel=="team"&&isLead?teamPanel():""}
+  ${L.length?L.map(card).join(""):`<div class="note">No tasks yet.${isLead?" Tap “New task”.":""}</div>`}`;
+}
+function taskForm(){return `<div class="card"><div class="t">New task</div><input id="f_t" placeholder="Task title">
+<select id="f_ty">${TYPES.map(x=>`<option>${x}</option>`).join("")}</select>
+<select id="f_a"><option value="">Assign to…</option>${Object.keys(users).map(i=>`<option value="${i}">${esc(users[i].name)}</option>`).join("")}</select>
+<input id="f_d" type="date"><textarea id="f_x" rows="3" placeholder="Work details"></textarea>
+<button class="btn p" onclick="addTask()">Assign task</button></div>`}
+async function addTask(){const title=$("f_t").value.trim();if(!title)return alert("Enter a title");
+  try{await db.collection("tasks").add({title,type:$("f_ty").value,assignee:$("f_a").value,due:$("f_d").value,details:$("f_x").value.trim(),created:Date.now(),by:me});panel=null;render()}catch(e){alert(msg(e))}}
+function teamPanel(){return `<div class="card"><div class="t">Team members</div>${Object.keys(users).map(i=>`<div class="m">${esc(users[i].name)} · ${esc(users[i].email)}${users[i].role=="leader"?" · leader":""}</div>`).join("")}
+<div class="tl"><div class="t">Add member</div><input id="m_n" placeholder="Name"><input id="m_e" type="email" placeholder="Email"><input id="m_p" type="text" placeholder="Temporary password (6+ chars)">
+<button class="btn p" onclick="addMember()">Add member</button></div></div>`}
+async function addMember(){
+  const name=$("m_n").value.trim(),email=$("m_e").value.trim(),pw=$("m_p").value;if(!name||!email)return alert("Enter name and email");
+  let sec;try{sec=firebase.apps.find(a=>a.name=="sec")||firebase.initializeApp(firebaseConfig,"sec");
+    const c=await sec.auth().createUserWithEmailAndPassword(email,pw);
+    await sec.firestore().doc("users/"+c.user.uid).set({name,email,role:"member"});await sec.auth().signOut();alert("Member added. Share the app link, email and password with "+name+".")}
+  catch(e){alert(msg(e))}
+}
+function card(t){
+  const st=latest(t),o=open===t.id,ups=updates.filter(x=>x.taskId===t.id).sort((a,b)=>b.at-a.at),can=t.assignee===me||isLead;
+  return `<div class="card"><div class="row" onclick="open=${o?"null":`'${t.id}'`};render()" style="cursor:pointer"><div><div class="t">${esc(t.title)}</div><div class="m">${esc(t.type)} · 👤 ${esc(nm(t.assignee))}${t.due?" · 📅 "+esc(t.due):""}</div></div><span class="chip ${cls(st)}">${st}</span></div>
+  ${o?`<div class="tl">${t.details?`<div>${esc(t.details)}</div>`:""}
+  ${ups.map(u=>`<div class="u"><b>${esc(u.status)}</b> · ${esc(nm(u.by))} · <span class="m">${new Date(u.at).toLocaleString()}</span>${u.note?`<div>${esc(u.note)}</div>`:""}${u.photo?`<img src="${u.photo}">`:""}</div>`).join("")||'<div class="m">No updates yet.</div>'}
+  ${can?`<div class="tl"><select id="st">${STAT.map(s=>`<option ${s==st?"selected":""}>${s}</option>`).join("")}</select><textarea id="nt" rows="2" placeholder="Note (optional)"></textarea><input type="file" id="ph" accept="image/*" capture="environment"><button class="btn p" id="ub" onclick="sendUpdate('${t.id}')">Post update</button></div>`:""}
+  ${isLead?`<button class="btn" style="margin-top:8px" onclick="delTask('${t.id}')">Delete task</button>`:""}</div>`:""}</div>`;
+}
+async function delTask(id){if(confirm("Delete this task?"))try{await db.collection("tasks").doc(id).delete()}catch(e){alert(msg(e))}}
+function shrink(f){return new Promise((r,j)=>{const i=new Image();i.onload=()=>{const k=Math.min(1,1000/Math.max(i.width,i.height)),c=document.createElement("canvas");c.width=i.width*k;c.height=i.height*k;c.getContext("2d").drawImage(i,0,0,c.width,c.height);r(c.toDataURL("image/jpeg",.65))};i.onerror=()=>j(new Error("Bad image"));i.src=URL.createObjectURL(f)})}
+async function sendUpdate(taskId){
+  const b=$("ub");b.disabled=true;b.textContent="Posting…";
+  try{const f=$("ph").files[0],photo=f?await shrink(f):null;
+    await db.collection("updates").add({taskId,status:$("st").value,note:$("nt").value.trim(),photo,by:me,at:Date.now()})}
+  catch(e){alert("Failed: "+msg(e));b.disabled=false;b.textContent="Post update"}
+}
+</script></body></html>
